@@ -1,0 +1,167 @@
+---
+title: "DRAFT: Pulling Heartbeat Data from iPhone using only the Camera"
+output: html_notebook
+---
+p
+
+You can find the gif of the [video](https://giphy.com/gifs/rDFkurJPv6crC)
+
+This mental exercise was formed out of curiousity in using data in unconventional ways. There is data everywhere and it is our jobs as engineers to pull the rabbit out of the bag. Of course there needs to be practice to do so. Data can look messy, but it doesn't mean it is unusable in all cases. As the old adage says, the devil is in the details. And that is where we provide the d So I was thinking the other day, about an app I downloaded a couple years ago called Instant Heart Rate  +[1](https://itunes.apple.com/us/app/instant-heart-rate-heart-rate-pulse-monitor/id409625068?mt=8). This  was interesting to me at the time and thus bought the app. Now how accurate it was, I do not know because I didn't necessarily use it a whole lot and didn't do any sort of testing on the app. So following are the journeys I've taken to try to understand it better. 
+
+The first thing we have to do is cut the video into frames so that it can be evaluated. Since I didn't find a library that might do that in R. I just used some Python CV2 to generate my frames. 
+
+```{python, echo=TRUE}
+# Done using Python 
+import cv2
+
+vidPath = 'IMG_4670.MOV' 
+count = 0
+
+vidcap = cv2.VideoCapture(vidPath)
+success,image = vidcap.read()
+success = True
+while success:
+  success,image = vidcap.read()
+  print('Read a new frame: ', success)
+  currentCount = count + 1
+  cv2.imwrite("%d.jpg" % currentCount, image)     # save frame as JPEG file
+  count += 1
+```
+
+The above code managed to deliver .jpg files in sequence that can be analyzed in R. 
+
+```{r Libraries and Parameters, include=FALSE}
+library(stringr)
+library(imager)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+
+graphsYN <- 0
+fileDirectory <- "~/Documents/r-sessions/ImageRecognition/data/"
+
+
+getPeaks <- function (x, thresh = 0) 
+{
+    pks <- which(diff(sign(diff(x, na.pad = FALSE)), na.pad = FALSE) < 0) + 2
+    if (!missing(thresh)) {
+        pks[x[pks - 1] - x[pks] > thresh]
+    }
+    else pks
+}
+```
+
+
+
+```{r Preparation}
+
+#Read jpeg files into the system 
+files <- list.files("data", pattern = "*.jpg")
+
+#Create the data table 
+imageDataset <- data.frame(Name = numeric(), Intensity = double())
+
+```
+
+
+Now, here we are taking the images and doing some manipulation to them so that we can use the image's histogram to extract the data  that we are looking to use. 
+```{r Process the Files}
+for(i in files)
+{
+  file_df <- load.image(paste0(fileDirectory,i))
+  
+  #Process images by converting to Grayscale, Resizing and then storing the intensity pixels to be observed as a histogram 
+  img <- grayscale(as.cimg(file_df))
+  img <- resize(img,round(width(img)/4), round(height(img)/4))
+  img_gs_r <- as.data.frame(img)
+  img_gs_r_df <- data.frame(Name = as.numeric(str_replace(i, ".jpg", "")), Intensity = img_gs_r$value)
+ 
+  percentUnder <- img_gs_r_df %>% filter(Intensity <= 0.3) %>% summarize(LowerThan = n())
+  imageDataset <- rbind(imageDataset, c(as.numeric(str_replace(i, ".jpg", "")),percentUnder$LowerThan))
+  
+  # Check 1 to create histogram of graph
+  if(graphsYN == 1)
+  {
+     graph <- imgr %>% ggplot( aes(Intensity, xmin = 0.25, xmax = 0.35)) + geom_histogram(bins = 50)
+     ggsave(paste0(str_replace(i, ".jpg", ""),'.jpeg'), plot = graph)
+  }
+ 
+}
+```
+
+
+I've taken the data from the images and show those points them on a line graph. 
+
+```{r Visualize the data}
+colnames(imageDataset) <- c("Frame","Intensity")
+g <- imageDataset %>% 
+  ggplot(aes(Frame, Intensity)) + 
+  geom_line() + 
+  labs(title = "Heartbeat Data")
+
+g
+
+```
+
+
+Been able to show distinctive peaks from the data; now onward to determining the actual heart rate of the clip. Previously we need to write a function that will pull out the peaks from the data so that we can understand the number of thumps per hour.
+
+```{r}
+totalPoints <- imageDataset[getPeaks(imageDataset$Intensity, thresh = 1),]
+```
+Here we select the peaks by pulling out their indices so that we can create our peak dataset which then can be visualized to verify that our peaks are giving us the images we need. However here we find that there are more maximums in the data than needed.
+
+```{r}
+g_ann1 <- g + 
+  geom_point(data = totalPoints, aes(x = Frame, y = Intensity), color = "red") + 
+  labs(title = "Heartbeat Data Annotated with Peaks")
+g_ann1
+```
+
+This is slightly messy and would be difficult to extract a heartbeat from these frames; so we need to create thresholds to eliminate these peaks. In this case I sort of rigged it by pullout out the data manually. This would not be an advised sort of instance as it isn't reproducible on another dataset. However since this is but a quicker exercise we will add a few filters to get us the data.
+
+```{r}
+totalPointsFiltered <- totalPoints %>% filter(Intensity > 5000, !(Frame %in% c(37,41,271, 291,311,331,339, 361,380,400)))
+g_ann <- g + geom_point(data = totalPointsFiltered, aes(x = Frame, y = Intensity), color = "red") + labs(title = "Heartbeat Data Annotated with Peaks")
+g_ann
+```
+So pretty good, but won't give me exactly what I need since it is finding the maximums; however it is finding too many of them. 
+ 
+
+```{r}
+
+distance <- as.matrix(dist(sort(totalPointsFiltered$Frame)))
+d <- vector()
+
+for (i in 1:(ncol(distance)-1))
+{ 
+  d <- rbind(d,c(distance[i,i+1]))
+}
+
+#Length of the video 
+videoTime <- 13
+
+beatsFrame <- as.vector(unlist(d))
+
+# Heartbeat using average by frames (needs frame )
+(30*60)/mean(beatsFrame)
+
+# Heartbeat rate by beat count
+(length(beatsFrame) / videoTime)*60
+```
+
+
+In order to not lose precious data; especially if it runs more slowly than on other computers; just save the data of interest so that you might be able to reproduce your graphs. 
+
+```{r}
+write.csv(imageDataset, "img4626.csv")
+```
+
+
+## Conclusions
+This might be a little rough around the edges; but it does give us the ability  to expand our minds to come up with creative ways to use information we can find around us might give us more than we might think. 
+
+* One has to get a good cover over the camera. 
+
+## Further research 
+* Currently this is a rather bruteforce way of getting the data I need, however it does prove the point and thus can be further modified to get better results. 
